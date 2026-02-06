@@ -1,0 +1,57 @@
+MVP PDF -> Text extraction plan (agentic-peer-review)
+
+Goal
+- Minimal pipeline to accept PDFs, extract raw text + basic metadata, and store results.
+- Avoid Grobid/Java/Python; keep Node-friendly for MVP.
+
+Recommended approach
+- Use npm package "pdf2json" in a Next.js API route or background worker.
+- Client uploads PDF, server parses, returns JSON or extracted text.
+- Store extracted text + metadata for later analysis.
+
+Why pdf2json
+- Works in Node (API route), no Java dependency.
+- Provides text + layout info; sufficient for MVP analysis prompts.
+- Not browser-safe; must run server-side.
+
+High-level flow
+1) Upload PDF (client) -> API route
+2) API route saves file (temp or object storage)
+3) API route runs pdf2json to extract text + page count
+4) Store results in DB (or return to client)
+5) UI updates status: queued -> extracting -> ready or failed
+
+Data to store per file
+- id
+- original filename
+- size (bytes)
+- mime type
+- last modified (client)
+- upload timestamp (server)
+- page count
+- extracted plain text
+- optional: pages array with per-page text
+- processing status + errors
+
+UI additions (current list)
+- Add per-file status badge (Queued / Extracting / Ready / Failed)
+- Add "Open extraction" or "Preview text" button
+- Optional: show page count once ready
+
+API route sketch (Next.js App Router)
+- POST /api/parse-pdf
+- Body: multipart/form-data with file
+- Steps:
+  - Read file -> buffer
+  - pdf2json parses -> extract text
+  - return { success, pageCount, text, warnings? }
+
+Potential issues / constraints
+- Serverless limits (CPU/time): keep parsing under size cap (10MB).
+- Use background job if needed for large PDFs.
+- If hosting on Vercel, consider running parsing in a separate Node server/worker.
+
+Next tasks
+1) Add API route using pdf2json (parse + return text)
+2) Update UI to call API after upload, store status + parsed data
+3) Persist to DB/storage if needed
