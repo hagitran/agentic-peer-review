@@ -23,6 +23,15 @@ type SelectedPaper = {
 };
 
 type AppTab = "overview" | "method" | "evals" | "results";
+type FeasibilityStatus = "yes" | "no" | "unclear";
+
+type FeasibilityResult = {
+  feasible: FeasibilityStatus;
+  reason: string;
+  blockers: string[];
+  confidence: number;
+  evidence_snippets: string[];
+};
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -34,6 +43,10 @@ export default function Home() {
   const [selectedFiles, setSelectedFiles] = useState<SelectedPaper[]>([]);
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>("overview");
+  const [feasibilityLoading, setFeasibilityLoading] = useState(false);
+  const [feasibilityError, setFeasibilityError] = useState<string | null>(null);
+  const [feasibilityResult, setFeasibilityResult] = useState<FeasibilityResult | null>(null);
+  const [feasibilityExtractionId, setFeasibilityExtractionId] = useState<string | null>(null);
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     const kb = bytes / 1024;
@@ -43,6 +56,14 @@ export default function Home() {
   };
   const previewPaper =
     previewKey ? selectedFiles.find((item) => item.key === previewKey) ?? null : null;
+  const latestReadyPaper = [...selectedFiles]
+    .reverse()
+    .find((paper) => paper.status === "ready" && paper.extractionId);
+  const latestReadyExtractionId = latestReadyPaper?.extractionId ?? null;
+  const isCurrentFeasibilityResult =
+    Boolean(feasibilityResult) && feasibilityExtractionId === latestReadyExtractionId;
+  const hasFeasibilityPass =
+    isCurrentFeasibilityResult && feasibilityResult?.feasible === "yes";
 
   const onExtract = async (paperKey: string) => {
     const selectedPaper = selectedFiles.find((item) => item.key === paperKey);
@@ -119,6 +140,49 @@ export default function Home() {
             : item
         )
       );
+    }
+  };
+
+  const onCheckFeasibility = async () => {
+    if (!latestReadyExtractionId) return;
+
+    setFeasibilityLoading(true);
+    setFeasibilityError(null);
+
+    try {
+      const response = await fetch("/api/feasibility", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ extractionId: latestReadyExtractionId }),
+      });
+
+      const raw = await response.text();
+      let payload: {
+        success?: boolean;
+        error?: string;
+        result?: FeasibilityResult;
+      } | null = null;
+
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = null;
+      }
+
+      if (!response.ok || !payload?.success || !payload.result) {
+        throw new Error(payload?.error || "Feasibility check failed.");
+      }
+
+      setFeasibilityExtractionId(latestReadyExtractionId);
+      setFeasibilityResult(payload.result);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Feasibility check failed.";
+      setFeasibilityError(message);
+    } finally {
+      setFeasibilityLoading(false);
     }
   };
 
@@ -247,7 +311,7 @@ export default function Home() {
                           className="flex items-start justify-between gap-4 border-b border-zinc-200 py-4 text-sm text-zinc-700 last:border-b-0"
                         >
                           <div className="min-w-0 flex flex-1 items-start gap-2">
-                            <span className="shrink-0 font-mono text-xs text-zinc-500">
+                            <span className="shrink-0 font-mono text-sm text-zinc-500">
                               {index + 1}.
                             </span>
                             <div className="min-w-0">
@@ -324,7 +388,7 @@ export default function Home() {
                             {paper.status === "ready" && paper.extractedText && (
                               <button
                                 type="button"
-                                className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80"
+                                className="cursor-pointer px-1 py-0.5 text-xs font-medium text-zinc-500 underline-offset-4 transition hover:text-zinc-900 hover:underline"
                                 onClick={() => setPreviewKey(paper.key)}
                               >
                                 Preview text
@@ -390,7 +454,7 @@ export default function Home() {
                       />
                     </svg>
                   </div>
-                  <p className="text-base text-zinc-500">
+                  <p className="text-md text-zinc-500">
                     Drop in a paper or click to select.
                   </p>
                   <input
@@ -429,17 +493,53 @@ export default function Home() {
                 </label>
               </div>
               <div className="mt-4 flex items-center justify-between gap-4">
-                <p className="text-xs text-zinc-500">
-                  Upload paper as a PDF, it should be no more than 10MB.
-                </p>
-                <button
-                  type="button"
-                  className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => setActiveTab("method")}
-                  disabled={selectedFiles.length === 0}
-                >
-                  Continue to method
-                </button>
+                <div className="text-xs">
+                  <p className="text-zinc-500">
+                    Upload paper as a PDF, it should be no more than 10MB.
+                  </p>
+                  {feasibilityLoading && (
+                    <p className="mt-1 text-amber-700">Checking feasibility...</p>
+                  )}
+                  {!feasibilityLoading && feasibilityError && (
+                    <p className="mt-1 text-red-700">Failed: {feasibilityError}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
+                  {hasFeasibilityPass && (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-zinc-700 px-2">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        className="h-3.5 w-3.5"
+                        aria-hidden="true"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M5 12l5 5L19 7"
+                        />
+                      </svg>
+                      Looks feasible to me
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => {
+                      if (hasFeasibilityPass) {
+                        setActiveTab("method");
+                        return;
+                      }
+                      void onCheckFeasibility();
+                    }}
+                    disabled={!latestReadyExtractionId || feasibilityLoading}
+                  >
+                    {hasFeasibilityPass ? "Continue to method" : "Check feasibility"}
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -451,10 +551,10 @@ export default function Home() {
               </div>
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 <p className="text-sm text-zinc-700 sm:col-span-2">
-                  To reconstruct the methodology for this paper we'll present a
-                  few assumptions we've synthesized.
+                  To reconstruct the methodology for this paper we present a
+                  few assumptions we synthesized.
                 </p>
-                {["Ceteris paribus", "Hello Jonah", "Hi Hagi how are you?", "I'm good and you?", "I'm good too, thanks for asking!", "This art was done by Hagi"].map((assumption, index) => (
+                {["Ceteris paribus", "Hello Jonah", "Hi Hagi how are you?", "I am good and you?", "I am good too, thanks for asking!", "This art was done by Hagi"].map((assumption, index) => (
                   <p
                     key={assumption}
                     className="w-full border bg-zinc-50 border-zinc-200 px-4 py-2 text-left text-xs text-zinc-700"
