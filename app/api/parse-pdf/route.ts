@@ -30,15 +30,19 @@ function parsePdfBuffer(buffer: Buffer) {
     (resolve, reject) => {
       const parser = new PDFParser();
 
-      parser.on("pdfParser_dataError", (error) => {
+      parser.on("pdfParser_dataError", (error: unknown) => {
+        const typedError = error as { parserError?: { toString?: () => string } } | undefined;
         const message =
-          error?.parserError?.toString?.() ??
+          typedError?.parserError?.toString?.() ??
           "Unable to parse PDF. The file may be encrypted or malformed.";
         reject(new Error(message));
       });
 
-      parser.on("pdfParser_dataReady", (data) => {
-        const pages: ParsedPage[] = (data?.Pages ?? []).map(
+      parser.on("pdfParser_dataReady", (data: unknown) => {
+        const typedData = data as {
+          Pages?: Array<{ Texts?: Array<{ x: number; y: number; R?: Array<{ T: string }> }> }>;
+        } | null;
+        const pages: ParsedPage[] = (typedData?.Pages ?? []).map(
           (
             page: { Texts?: Array<{ x: number; y: number; R?: Array<{ T: string }> }> },
             index: number

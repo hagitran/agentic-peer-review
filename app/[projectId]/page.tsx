@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppTopbar } from "@/components/app-topbar";
 
@@ -46,12 +46,65 @@ type Project = {
   files: ProjectFile[];
 };
 
+const RECENT_PROJECTS_COOKIE = "apr_recent_projects";
+const RECENT_PROJECTS_LIMIT = 12;
+const ASCII_FRAMES = ["[·  ]", "[·· ]", "[···]", "[ ··]", "[  ·]"];
+
+type RecentProject = {
+  projectId: string;
+  filename: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  fileHash: string;
+};
+
+type TerminalMessage = {
+  role: "assistant" | "user";
+  text: string;
+};
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
   const mb = kb / 1024;
   return `${mb.toFixed(1)} MB`;
+}
+
+function truncateFilename(value: string, max = 44) {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
+}
+
+function getCookieValue(name: string) {
+  if (typeof document === "undefined") return null;
+  const cookie = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith(`${name}=`));
+  if (!cookie) return null;
+  return decodeURIComponent(cookie.split("=")[1] ?? "");
+}
+
+function readRecentProjectsCookie() {
+  const raw = getCookieValue(RECENT_PROJECTS_COOKIE);
+  if (!raw) return [] as RecentProject[];
+  try {
+    const parsed = JSON.parse(raw) as RecentProject[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item) =>
+          item &&
+          typeof item.projectId === "string" &&
+          typeof item.filename === "string" &&
+          typeof item.sizeBytes === "number" &&
+          typeof item.uploadedAt === "string" &&
+          typeof item.fileHash === "string"
+      )
+      .slice(0, RECENT_PROJECTS_LIMIT);
+  } catch {
+    return [];
+  }
 }
 
 function renderHighlightedLine(text: string) {
@@ -75,10 +128,18 @@ function renderHighlightedLine(text: string) {
   );
 }
 
+function assistantMessageTag(text: string) {
+  const value = text.toLowerCase();
+  if (/\b(error|failed|unable|cannot|invalid)\b/.test(value)) return "[err]";
+  if (/\bmethod flow|summary\b/.test(value)) return "[sum]";
+  if (/\bshould|try|use|run|set|check|next\b/.test(value)) return "[act]";
+  return "[ans]";
+}
+
 export default function ProjectPage() {
   const params = useParams<{ projectId: string }>();
+  const router = useRouter();
   const projectId = params.projectId;
-  const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const subPdfInputRef = useRef<HTMLInputElement | null>(null);
 
   const [project, setProject] = useState<Project | null>(null);
@@ -88,6 +149,13 @@ export default function ProjectPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [deletedMethodSteps, setDeletedMethodSteps] = useState<Record<string, boolean>>({});
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [asciiFrameIndex, setAsciiFrameIndex] = useState(0);
+  const [terminalInput, setTerminalInput] = useState("");
+  const [terminalMessages, setTerminalMessages] = useState<TerminalMessage[]>([]);
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false);
+  const terminalScrollRef = useRef<HTMLDivElement | null>(null);
 
   const previewFile = useMemo(
     () => project?.files.find((file) => file.id === previewFileId) ?? null,
@@ -128,6 +196,15 @@ export default function ProjectPage() {
     };
   }, [project?.method_result_json]);
 
+  const recentOptions = useMemo(
+    () =>
+      recentProjects.map((entry) => ({
+        value: entry.projectId,
+        label: `${truncateFilename(entry.filename)} • ${formatFileSize(entry.sizeBytes)} • ${new Date(entry.uploadedAt).toLocaleDateString()}`,
+      })),
+    [recentProjects]
+  );
+
   const loadProject = async () => {
     setLoading(true);
     setError(null);
@@ -158,6 +235,33 @@ export default function ProjectPage() {
     void loadProject();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  useEffect(() => {
+    setRecentProjects(readRecentProjectsCookie());
+  }, []);
+
+  useEffect(() => {
+    const isRunning = busy === "feasibility" || busy === "method" || project?.method_status === "running";
+    if (!isRunning) return;
+    const intervalId = window.setInterval(() => {
+      setAsciiFrameIndex((prev) => (prev + 1) % ASCII_FRAMES.length);
+    }, 130);
+    return () => window.clearInterval(intervalId);
+  }, [busy, project?.method_status]);
+
+  useEffect(() => {
+    if (project?.method_status === "ready") return;
+    setTerminalDrawerOpen(false);
+    setTerminalInput("");
+    setTerminalMessages([]);
+  }, [project?.method_status]);
+
+  useEffect(() => {
+    if (!terminalDrawerOpen) return;
+    const container = terminalScrollRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [terminalDrawerOpen, terminalMessages, terminalBusy]);
 
   const uploadFile = async (file: File, action: "replace_primary" | "add_subpdf") => {
     setBusy(action);
@@ -207,6 +311,31 @@ export default function ProjectPage() {
     }
   };
 
+  const runMethod = async (options?: { manageBusy?: boolean }) => {
+    const manageBusy = options?.manageBusy ?? true;
+    if (manageBusy) setBusy("method");
+
+    try {
+      const response = await fetch("/api/method", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+      const payload = (await response.json()) as { success?: boolean; error?: string };
+
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || "Method generation failed.");
+      }
+
+      setDeletedMethodSteps({});
+      await loadProject();
+    } catch {
+      await loadProject();
+    } finally {
+      if (manageBusy) setBusy(null);
+    }
+  };
+
   const runFeasibility = async () => {
     setBusy("feasibility");
     setError(null);
@@ -228,6 +357,10 @@ export default function ProjectPage() {
       }
 
       await loadProject();
+      if (payload.result.feasible === "yes") {
+        setBusy("method");
+        await runMethod({ manageBusy: false });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Feasibility check failed.");
     } finally {
@@ -235,27 +368,31 @@ export default function ProjectPage() {
     }
   };
 
-  const runMethod = async () => {
-    setBusy("method");
-
+  const runTerminal = async () => {
+    const prompt = terminalInput.trim();
+    if (!prompt || terminalBusy) return;
+    setTerminalBusy(true);
+    setTerminalMessages((prev) => [...prev, { role: "user", text: prompt }]);
+    setTerminalInput("");
     try {
-      const response = await fetch("/api/method", {
+      const response = await fetch("/api/method-terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, prompt }),
       });
-      const payload = (await response.json()) as { success?: boolean; error?: string };
-
-      if (!response.ok || !payload?.success) {
-        throw new Error(payload?.error || "Method generation failed.");
+      const payload = (await response.json()) as { success?: boolean; reply?: string; error?: string };
+      const reply = payload?.reply?.trim();
+      if (!response.ok || !payload?.success || !reply) {
+        throw new Error(payload?.error || "Terminal request failed.");
       }
-
-      setDeletedMethodSteps({});
-      await loadProject();
-    } catch {
-      await loadProject();
+      setTerminalMessages((prev) => [...prev, { role: "assistant", text: reply }]);
+    } catch (e) {
+      setTerminalMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: e instanceof Error ? e.message : "Terminal request failed." },
+      ]);
     } finally {
-      setBusy(null);
+      setTerminalBusy(false);
     }
   };
 
@@ -276,6 +413,13 @@ export default function ProjectPage() {
   }
 
   const hasLgtm = project.feasibility_status === "yes";
+  const feasibilityReason = project.feasibility_result_json?.reason?.trim();
+  const feasibilityStatusMessage =
+    project.feasibility_status === "no"
+      ? `Feasibility failed: ${feasibilityReason || "This does not look like a research paper."}`
+      : project.feasibility_status === "unclear"
+        ? `Feasibility unclear: ${feasibilityReason || "Could not confidently assess this paper."}`
+        : null;
   const showInsightsColumn = methodData.insights.length > 0;
   const assumptionsScore =
     methodData.assumptions.reduce((total, item) => total + item.length, 0) +
@@ -283,11 +427,64 @@ export default function ProjectPage() {
   const insightsScore =
     methodData.insights.reduce((total, item) => total + item.length, 0) +
     methodData.insights.length * 24;
-  const deadzoneThreshold = 120;
   const showAssumptionsDeadzone =
-    showInsightsColumn && assumptionsScore + deadzoneThreshold < insightsScore;
+    showInsightsColumn && assumptionsScore < insightsScore;
   const showInsightsDeadzone =
-    showInsightsColumn && insightsScore + deadzoneThreshold < assumptionsScore;
+    showInsightsColumn && insightsScore < assumptionsScore;
+  const isFeasibilityRunning = busy === "feasibility";
+  const isMethodRunning = busy === "method" || project.method_status === "running";
+  const isPipelineRunning = isFeasibilityRunning || isMethodRunning;
+  const pipelineStateText = isFeasibilityRunning
+    ? "checking feasibility"
+    : isMethodRunning
+      ? "generating method"
+      : project.method_status === "ready"
+        ? "method ready for evals"
+        : hasLgtm
+          ? "ready to generate method"
+          : "awaiting feasibility";
+  const pipelinePrefix = isPipelineRunning
+    ? ASCII_FRAMES[asciiFrameIndex]
+    : project.method_status === "ready"
+      ? "[ready]"
+      : hasLgtm
+        ? "[next]"
+        : "[wait]";
+  const methodSummaryLine = (() => {
+    if (project.method_status !== "ready") return pipelineStateText;
+    const stepLabels = methodData.methodSteps
+      .map((step) => step.text.split(":")[0]?.trim())
+      .filter((label): label is string => Boolean(label && label.length > 0));
+
+    if (stepLabels.length > 0) {
+      const head = stepLabels.slice(0, 3).join(" -> ");
+      const verifier =
+        stepLabels.find((label) => /\bverify|validate|check|test\b/i.test(label)) ??
+        stepLabels[stepLabels.length - 1];
+      const summary = `${head}${verifier && verifier !== stepLabels[2] ? ` -> ${verifier}` : ""}.`;
+      return summary;
+    }
+
+    const allText = [
+      ...methodData.methodSteps.map((step) => step.text),
+      ...methodData.assumptions,
+      ...methodData.insights,
+    ].join(" ");
+    const hasChannelRates = /(33%|66%|99%|channel|corruption|reliability)/i.test(allText);
+    const hasPartitioning = /(partition|leaf size|leaf|merkle)/i.test(allText);
+    const hasOptimization = /(optimal|optimi[sz]|minimi[sz])/i.test(allText);
+
+    if (hasChannelRates && hasPartitioning && hasOptimization) {
+      return "Find optimal partitions across 33%, 66%, and 99% channel reliability.";
+    }
+    if (hasPartitioning && hasOptimization) {
+      return "Optimize partition size to minimize end-to-end verification time.";
+    }
+    if (hasOptimization) {
+      return "Method is ready: optimize for lower verification overhead.";
+    }
+    return "Method extracted and ready for evaluation.";
+  })();
   const toggleDeletedMethodStep = (key: string) => {
     setDeletedMethodSteps((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -304,19 +501,13 @@ export default function ProjectPage() {
         <AppTopbar
           activeTab={activeTab}
           onTabChange={handleTabChange}
-          onNewPaperClick={() => replaceInputRef.current?.click()}
+          onNewPaperClick={() => router.push("/")}
           newPaperDisabled={Boolean(busy)}
-        />
-        <input
-          ref={replaceInputRef}
-          type="file"
-          accept="application/pdf"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (!file) return;
-            void uploadFile(file, "replace_primary");
-            event.currentTarget.value = "";
+          pastPaperOptions={recentOptions}
+          pastPaperValue={projectId ?? ""}
+          onPastPaperSelect={(nextProjectId) => {
+            if (!nextProjectId) return;
+            router.push(`/${nextProjectId}`);
           }}
         />
 
@@ -487,13 +678,21 @@ export default function ProjectPage() {
                 </label>
               </div>
 
-              <div className="mt-4 flex items-center justify-between gap-4">
-                <div className="text-xs">
+              <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0 max-w-[72ch] flex-1 text-xs">
                   <p className="text-zinc-500">Upload other relevant documents like datasets, up to 10MB.</p>
                   {busy === "method" && <p className="mt-1 text-amber-700">Generating method...</p>}
+                  {feasibilityStatusMessage && (
+                    <p
+                      className={`mt-1 ${project.feasibility_status === "no" ? "text-red-700" : "text-amber-700"
+                        }`}
+                    >
+                      {feasibilityStatusMessage}
+                    </p>
+                  )}
                   {error && <p className="mt-1 text-red-700">Failed: {error}</p>}
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="ml-auto flex shrink-0 items-center gap-3">
                   {hasLgtm && (
                     <p className="inline-flex items-center gap-1 text-xs font-medium text-zinc-800 px-2">
                       <svg
@@ -523,13 +722,15 @@ export default function ProjectPage() {
                       }
                       void runFeasibility();
                     }}
-                    disabled={!primaryFile || busy === "feasibility" || busy === "method"}
+                    disabled={!primaryFile || Boolean(busy)}
                   >
-                    {busy === "feasibility"
-                      ? "Checking feasibility..."
-                      : hasLgtm
-                        ? "Continue to method"
-                        : "Check feasibility"}
+                    {busy === "method"
+                      ? "Generating method..."
+                      : busy === "feasibility"
+                        ? "Checking feasibility..."
+                        : hasLgtm
+                          ? "Continue to method"
+                          : "Check feasibility"}
                   </button>
                 </div>
               </div>
@@ -538,7 +739,7 @@ export default function ProjectPage() {
 
           {activeTab === "method" && (
             <div className="w-full max-w-3xl border border-zinc-200 bg-white px-6 py-6">
-              <div className="flex items-start justify-between gap-3 border-b border-zinc-200 pb-5">
+              <div className="flex items-start justify-between gap-3 border-b border-zinc-200 pb-4">
                 <div>
                   <div className="flex items-center gap-2 text-md font-medium text-zinc-900">
                     <svg
@@ -565,7 +766,7 @@ export default function ProjectPage() {
                   type="button"
                   className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => void runMethod()}
-                  disabled={!hasLgtm || busy === "method" || project.method_status === "running"}
+                  disabled={!hasLgtm || Boolean(busy) || project.method_status === "running"}
                 >
                   {busy === "method" || project.method_status === "running"
                     ? "Generating method..."
@@ -575,19 +776,59 @@ export default function ProjectPage() {
                 </button>
               </div>
 
-              <div className="space-y-5">
-                {project.method_status === "running" && (
-                  <p className="text-sm text-zinc-500">Generating method...</p>
-                )}
+              <div className="mt-4 space-y-4">
+                <form
+                  className="flex h-10 items-center gap-3 border border-zinc-200 bg-zinc-50 px-2 font-mono text-xs"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void runTerminal();
+                  }}
+                >
+                  <span
+                    className={`${isPipelineRunning || project.method_status === "ready"
+                      ? "bg-amber-300 text-zinc-900"
+                      : "text-zinc-500"
+                      }`}
+                  >
+                    {pipelinePrefix}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-zinc-600">
+                    {methodSummaryLine}
+                  </span>
+                  {project.method_status === "ready" && (
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border border-zinc-200 bg-white px-2 py-1 text-zinc-600 transition hover:border-zinc-300 hover:text-zinc-900"
+                      onClick={() => {
+                        setTerminalDrawerOpen(true);
+                        setTerminalMessages((prev) =>
+                          prev.length > 0 ? prev : [{ role: "assistant", text: methodSummaryLine }]
+                        );
+                      }}
+                    >
+                      Ask
+                    </button>
+                  )}
+                </form>
                 {project.method_status === "failed" && (
                   <p className="text-sm text-red-700">
                     Failed: {project.method_error || "Method generation failed."}
                   </p>
                 )}
                 {project.method_status === "idle" && (
-                  <p className="text-sm text-zinc-500">
-                    {hasLgtm ? "Generating method..." : "Feasibility must pass before method synthesis."}
-                  </p>
+                  hasLgtm ? null : (
+                    <div className="flex flex-col flex-wrap gap-3">
+                      <p className="text-sm text-zinc-500">Feasibility must pass before method synthesis.</p>
+                      <button
+                        type="button"
+                        className="cursor-pointer bg-amber-300 w-max px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void runFeasibility()}
+                        disabled={!primaryFile || busy === "feasibility" || busy === "method"}
+                      >
+                        {busy === "feasibility" ? "Checking feasibility..." : "Check feasibility"}
+                      </button>
+                    </div>
+                  )
                 )}
                 {project.method_status === "ready" && (
                   <div className="">
@@ -712,6 +953,91 @@ export default function ProjectPage() {
           )}
         </section>
       </main>
+
+      {terminalDrawerOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="Close ask drawer"
+            className="fixed inset-0 z-20 bg-black/30"
+            onClick={() => {
+              setTerminalDrawerOpen(false);
+              setTerminalInput("");
+            }}
+          />
+          <aside className="fixed right-0 top-0 z-30 flex h-screen w-full max-w-lg flex-col border-l border-zinc-200 bg-white">
+            <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-zinc-900">Ask about method</p>
+                <p className="mt-1 text-xs text-zinc-500">Short answers, with history.</p>
+              </div>
+              <button
+                type="button"
+                className="cursor-pointer px-1 py-0.5 text-xs font-medium text-zinc-500 underline-offset-4 hover:text-zinc-900 hover:underline"
+                onClick={() => {
+                  setTerminalDrawerOpen(false);
+                  setTerminalInput("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div
+              ref={terminalScrollRef}
+              className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-zinc-50 px-5 py-4"
+              style={{
+                backgroundImage:
+                  "repeating-linear-gradient(135deg, rgba(228,228,231,1) 0, rgba(228,228,231,1) 1px, transparent 1px, transparent 18px)",
+              }}
+            >
+              {terminalMessages.map((message, index) => (
+                <div key={`${message.role}-${index}`} className={message.role === "user" ? "flex justify-end" : ""}>
+                  <div
+                    className={`max-w-[82%] border px-3 py-2 font-mono text-xs ${
+                      message.role === "assistant"
+                        ? "border-zinc-200 bg-white text-zinc-700"
+                        : "border-zinc-300 bg-white text-zinc-900"
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap break-words">
+                      <span className="mr-2 text-zinc-500">
+                        {message.role === "assistant" ? assistantMessageTag(message.text) : "[q]"}
+                      </span>
+                      {message.text}
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {terminalBusy && (
+                <div className="border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-xs text-zinc-700">
+                  <span className="mr-2 bg-amber-300 text-zinc-900">[run]</span>
+                  thinking...
+                </div>
+              )}
+            </div>
+            <form
+              className="mt-auto border-t border-zinc-200 px-5 py-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void runTerminal();
+              }}
+            >
+              <label className="flex h-10 items-center gap-2 border border-zinc-200 bg-white px-2 font-mono text-xs">
+                <span className="text-zinc-500">&gt;</span>
+                <input
+                  value={terminalInput}
+                  onChange={(event) => setTerminalInput(event.target.value)}
+                  placeholder="Ask anything"
+                  className="w-full min-w-0 bg-transparent text-zinc-700 outline-none placeholder:text-zinc-400"
+                  maxLength={140}
+                  disabled={terminalBusy}
+                  autoFocus
+                />
+              </label>
+            </form>
+          </aside>
+        </>
+      )}
 
       {previewFile && (
         <>

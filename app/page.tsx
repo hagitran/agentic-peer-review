@@ -1,15 +1,108 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppTopbar } from "@/components/app-topbar";
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const RECENT_PROJECTS_COOKIE = "apr_recent_projects";
+const RECENT_PROJECTS_LIMIT = 12;
+
+type RecentProject = {
+  projectId: string;
+  filename: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  fileHash: string;
+};
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function truncateFilename(value: string, max = 44) {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
+}
+
+function getCookieValue(name: string) {
+  if (typeof document === "undefined") return null;
+  const cookie = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith(`${name}=`));
+  if (!cookie) return null;
+  return decodeURIComponent(cookie.split("=")[1] ?? "");
+}
+
+function readRecentProjectsCookie() {
+  const raw = getCookieValue(RECENT_PROJECTS_COOKIE);
+  if (!raw) return [] as RecentProject[];
+  try {
+    const parsed = JSON.parse(raw) as RecentProject[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item) =>
+          item &&
+          typeof item.projectId === "string" &&
+          typeof item.filename === "string" &&
+          typeof item.sizeBytes === "number" &&
+          typeof item.uploadedAt === "string" &&
+          typeof item.fileHash === "string"
+      )
+      .slice(0, RECENT_PROJECTS_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function persistRecentProjectsCookie(projects: RecentProject[]) {
+  if (typeof document === "undefined") return;
+  const trimmed = projects.slice(0, RECENT_PROJECTS_LIMIT);
+  document.cookie = `${RECENT_PROJECTS_COOKIE}=${encodeURIComponent(JSON.stringify(trimmed))}; Path=/; Max-Age=31536000; SameSite=Lax`;
+}
+
+async function hashFile(file: File) {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  const bytes = new Uint8Array(digest);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export default function Home() {
   const router = useRouter();
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [selectedRecentProjectId, setSelectedRecentProjectId] = useState("");
+
+  useEffect(() => {
+    setRecentProjects(readRecentProjectsCookie());
+  }, []);
+
+  const recentOptions = useMemo(
+    () =>
+      recentProjects.map((project) => ({
+        ...project,
+        label: `${truncateFilename(project.filename)} • ${formatFileSize(project.sizeBytes)} • ${new Date(project.uploadedAt).toLocaleDateString()}`,
+      })),
+    [recentProjects]
+  );
+
+  const upsertRecentProject = (entry: RecentProject) => {
+    setRecentProjects((previous) => {
+      const deduped = previous.filter(
+        (item) => item.projectId !== entry.projectId && item.fileHash !== entry.fileHash
+      );
+      const next = [entry, ...deduped].slice(0, RECENT_PROJECTS_LIMIT);
+      persistRecentProjectsCookie(next);
+      return next;
+    });
+  };
 
   const onCreateProject = async (file: File) => {
     if (file.size > MAX_FILE_SIZE_BYTES) {
@@ -21,6 +114,19 @@ export default function Home() {
     setError(null);
 
     try {
+      const fileHash = await hashFile(file);
+      const existing = recentProjects.find(
+        (item) =>
+          item.filename === file.name &&
+          item.sizeBytes === file.size &&
+          item.fileHash === fileHash
+      );
+
+      if (existing?.projectId) {
+        router.push(`/${existing.projectId}`);
+        return;
+      }
+
       const formData = new FormData();
       formData.append("file", file);
       formData.append("lastModified", String(file.lastModified));
@@ -40,6 +146,14 @@ export default function Home() {
         throw new Error(payload?.error || "Failed to create project.");
       }
 
+      upsertRecentProject({
+        projectId: payload.projectId,
+        filename: file.name,
+        sizeBytes: file.size,
+        uploadedAt: new Date().toISOString(),
+        fileHash,
+      });
+
       router.push(`/${payload.projectId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create project.");
@@ -51,7 +165,19 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-50 font-sans text-zinc-900">
       <main className="mx-auto w-full max-w-6xl px-6 py-10">
-        <AppTopbar activeTab="overview" />
+        <AppTopbar
+          activeTab="overview"
+          pastPaperOptions={recentOptions.map((project) => ({
+            value: project.projectId,
+            label: project.label,
+          }))}
+          pastPaperValue={selectedRecentProjectId}
+          onPastPaperSelect={(nextId) => {
+            setSelectedRecentProjectId(nextId);
+            if (!nextId) return;
+            router.push(`/${nextId}`);
+          }}
+        />
 
         <section className="mt-24 flex justify-center">
           <div className="w-full max-w-3xl border border-zinc-200 bg-white px-6 py-6">
