@@ -84,6 +84,7 @@ async function runMethodSynthesis(cleanedText: string): Promise<MethodResult> {
                 "- Each item must be one sentence.\n" +
                 "- Keep items concise and concrete.\n" +
                 "- For method_steps, begin with an action label and colon, e.g. 'Partition input: ...'\n" +
+                "- Every method_steps item must include exactly one label prefix before a colon.\n" +
                 "- Exclude generic statements and background info from method_steps.\n\n" +
                 "- Prefer fewer, high-signal items over coverage. Do not pad lists.\n" +
                 "- If confidence is low for assumptions/insights, return fewer items or [].\n" +
@@ -117,7 +118,7 @@ async function runMethodSynthesis(cleanedText: string): Promise<MethodResult> {
                   type: "object",
                   additionalProperties: false,
                   properties: {
-                    text: { type: "string", maxLength: 180 },
+                    text: { type: "string", maxLength: 180, pattern: "^[^:]{2,60}:\\s.+" },
                     important: { type: "boolean" },
                   },
                   required: ["text", "important"],

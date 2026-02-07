@@ -63,7 +63,7 @@ function renderHighlightedLine(text: string) {
   };
 
   const [label, ...rest] = text.split(":");
-  if (rest.length === 0) return <span>{antiWidow(text)}</span>;
+  if (rest.length === 0) return <span className="leading-6 text-zinc-700">{antiWidow(text)}</span>;
   const detail = antiWidow(rest.join(":"));
   return (
     <span className="leading-6">
@@ -276,6 +276,18 @@ export default function ProjectPage() {
   }
 
   const hasLgtm = project.feasibility_status === "yes";
+  const showInsightsColumn = methodData.insights.length > 0;
+  const assumptionsScore =
+    methodData.assumptions.reduce((total, item) => total + item.length, 0) +
+    methodData.assumptions.length * 24;
+  const insightsScore =
+    methodData.insights.reduce((total, item) => total + item.length, 0) +
+    methodData.insights.length * 24;
+  const deadzoneThreshold = 120;
+  const showAssumptionsDeadzone =
+    showInsightsColumn && assumptionsScore + deadzoneThreshold < insightsScore;
+  const showInsightsDeadzone =
+    showInsightsColumn && insightsScore + deadzoneThreshold < assumptionsScore;
   const toggleDeletedMethodStep = (key: string) => {
     setDeletedMethodSteps((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -545,9 +557,9 @@ export default function ProjectPage() {
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4 12h.01" />
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4 18h.01" />
                     </svg>
-                    Method
+                    Methodology
                   </div>
-                  <p className="pl-6 text-xs text-zinc-500">Generated from your primary PDF after feasibility.</p>
+                  <p className="pl-6 text-xs text-zinc-500">Generated from your primary PDF&apos;s method.</p>
                 </div>
                 <button
                   type="button"
@@ -606,49 +618,83 @@ export default function ProjectPage() {
                       </ol>
                     </section>
 
-                    <div className={`grid gap-5 ${methodData.insights.length > 0 ? "md:grid-cols-2" : ""}`}>
-                      <section>
-                        <div className="mt-6 mb-2 flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-zinc-700">
-                            Assumptions
+                    <div className={`mt-6 grid gap-0 border border-zinc-200 ${showInsightsColumn ? "md:grid-cols-2" : ""}`}>
+                      <section className="flex h-full flex-col md:border-r md:border-zinc-200">
+                        <div className="flex items-center justify-between gap-3 p-4">
+                          <div>
+                            <div className="text-sm font-medium text-zinc-700">Assumptions</div>
+                            <p className="mt-0.5 text-xs text-zinc-500">
+                              Conditions assumed to be true.
+                            </p>
                           </div>
-                          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                          <div className="text-xs font-medium tracking-wide text-zinc-500">
                             {methodData.assumptions.length} items
                           </div>
                         </div>
-                        <ol className="divide-y divide-zinc-200 border-y border-zinc-200 text-sm">
+                        <ol className="divide-y divide-zinc-200 border-t border-zinc-200 text-sm">
                           {methodData.assumptions.length === 0 && (
-                            <li className="py-2.5 text-zinc-500">No assumptions were extracted.</li>
+                            <li className="px-4 py-2.5 text-zinc-500">No assumptions were extracted.</li>
                           )}
                           {methodData.assumptions.map((assumption, index) => (
-                            <li key={`${assumption}-${index}`} className="flex items-baseline gap-3 py-2.5">
+                            <li key={`${assumption}-${index}`} className="flex items-baseline gap-3 bg-white px-4 py-2.5">
                               <span className="font-mono text-xs text-zinc-500">{index + 1}.</span>
                               <span className="block min-w-0 leading-6">{renderHighlightedLine(assumption)}</span>
                             </li>
                           ))}
                         </ol>
+                        {showAssumptionsDeadzone && (
+                          <div
+                            className="flex-1 border-t border-zinc-200 bg-zinc-50"
+                            style={{
+                              backgroundImage:
+                                "repeating-linear-gradient(135deg, rgba(228,228,231,1) 0, rgba(228,228,231,1) 1px, transparent 1px, transparent 18px)",
+                            }}
+                          />
+                        )}
                       </section>
 
-                      {methodData.insights.length > 0 && (
-                        <section className="md:border-l md:border-zinc-200 md:pl-5">
-                          <div className="mt-6 mb-2 flex items-center justify-between gap-3">
-                            <div className="text-sm font-medium text-zinc-700">
-                              Insights
+                      {showInsightsColumn && (
+                        <section className="flex h-full flex-col">
+                          <div className="flex items-center justify-between gap-3 p-4">
+                            <div>
+                              <div className="text-sm font-medium text-zinc-700">Insights</div>
+                              <p className="mt-0.5 text-xs text-zinc-500">
+                                Things worth noting.
+                              </p>
                             </div>
-                            <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                            <div className="text-xs font-medium tracking-wide text-zinc-500">
                               {methodData.insights.length} items
                             </div>
                           </div>
-                          <ol className="divide-y divide-zinc-200 border-y border-zinc-200 text-sm">
+                          <ol className="divide-y divide-zinc-200 border-t border-zinc-200 text-sm">
                             {methodData.insights.map((insight, index) => (
-                              <li key={`${insight}-${index}`} className="flex items-baseline gap-3 py-2.5">
+                              <li key={`${insight}-${index}`} className="flex items-baseline gap-3 bg-white px-4 py-2.5">
                                 <span className="font-mono text-xs text-zinc-500">{index + 1}.</span>
                                 <span className="block min-w-0 leading-6">{renderHighlightedLine(insight)}</span>
                               </li>
                             ))}
                           </ol>
+                          {showInsightsDeadzone && (
+                            <div
+                              className="flex-1 border-t border-zinc-200 bg-zinc-50"
+                              style={{
+                                backgroundImage:
+                                  "repeating-linear-gradient(135deg, rgba(228,228,231,1) 0, rgba(228,228,231,1) 1px, transparent 1px, transparent 18px)",
+                              }}
+                            />
+                          )}
                         </section>
                       )}
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 mt-4"
+                        onClick={() => setActiveTab("evals")}
+                      >
+                        Continue to evals
+                      </button>
                     </div>
                   </div>
                 )}
