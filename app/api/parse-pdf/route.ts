@@ -1,8 +1,7 @@
 import PDFParser from "pdf2json";
 import { NextResponse } from "next/server";
-import type { Sql } from "postgres";
 
-import { getSql } from "@/lib/db";
+import { createAdminClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -98,68 +97,9 @@ function normalizeProjectTitle(filename: string) {
   return filename.replace(/\.pdf$/i, "").trim() || "Untitled project";
 }
 
-async function ensureSchema(sql: Sql) {
-  await sql`create extension if not exists pgcrypto`;
-
-  await sql`
-    do $$
-    begin
-      if exists (select 1 from information_schema.tables where table_name = 'paper_extractions') then
-        drop table paper_extractions;
-      end if;
-    end
-    $$;
-  `;
-
-  await sql`
-    create table if not exists projects (
-      id uuid primary key default gen_random_uuid(),
-      title text not null default 'Untitled project',
-      primary_file_id uuid,
-      feasibility_status text,
-      feasibility_result_json jsonb,
-      method_status text not null default 'idle',
-      method_error text,
-      method_result_json jsonb,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    )
-  `;
-
-  await sql`
-    alter table projects
-    add column if not exists method_error text
-  `;
-
-  await sql`
-    create table if not exists project_files (
-      id uuid primary key default gen_random_uuid(),
-      project_id uuid not null references projects(id) on delete cascade,
-      is_primary boolean not null default false,
-      original_filename text not null,
-      size_bytes bigint not null,
-      mime_type text not null,
-      client_last_modified timestamptz,
-      uploaded_at timestamptz not null default now(),
-      page_count integer not null default 0,
-      extracted_text text not null default '',
-      pages_json jsonb,
-      processing_status text not null default 'queued',
-      processing_error text
-    )
-  `;
-
-  await sql`
-    create unique index if not exists project_single_primary_idx
-    on project_files(project_id)
-    where is_primary = true
-  `;
-}
-
 export async function POST(request: Request) {
   try {
-    const sql = getSql();
-    await ensureSchema(sql);
+    const supabase = createAdminClient();
 
     const formData = await request.formData();
     const file = formData.get("file");
@@ -168,10 +108,7 @@ export async function POST(request: Request) {
     const clientLastModifiedRaw = formData.get("lastModified");
 
     if (!(file instanceof File)) {
-      return NextResponse.json(
-        { success: false, error: "File is required." },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: "File is required." }, { status: 400 });
     }
 
     if (file.type !== "application/pdf") {
@@ -204,178 +141,163 @@ export async function POST(request: Request) {
       );
     }
 
-    const clientLastModified =
+    const clientLastModifiedDate =
       typeof clientLastModifiedRaw === "string" && clientLastModifiedRaw.length > 0
         ? new Date(Number(clientLastModifiedRaw))
+        : null;
+    const clientLastModifiedIso =
+      clientLastModifiedDate && !Number.isNaN(clientLastModifiedDate.getTime())
+        ? clientLastModifiedDate.toISOString()
         : null;
 
     const arrayBuffer = await file.arrayBuffer();
     const parsed = await parsePdfBuffer(Buffer.from(arrayBuffer));
+    const nowIso = new Date().toISOString();
 
     if (action === "create_project") {
-      const projectRows = await sql<{ id: string }[]>`
-        insert into projects (title, updated_at)
-        values (${normalizeProjectTitle(file.name)}, now())
-        returning id
-      `;
-      const createdProjectId = projectRows[0]?.id;
-      if (!createdProjectId) {
-        throw new Error("Failed to create project.");
+      const { data: projectRow, error: projectError } = await supabase
+        .from("projects")
+        .insert({ title: normalizeProjectTitle(file.name), updated_at: nowIso })
+        .select("id")
+        .single();
+
+      if (projectError || !projectRow?.id) {
+        throw new Error(projectError?.message || "Failed to create project.");
       }
 
-      const fileRows = await sql<{ id: string }[]>`
-        insert into project_files (
-          project_id,
-          is_primary,
-          original_filename,
-          size_bytes,
-          mime_type,
-          client_last_modified,
-          page_count,
-          extracted_text,
-          pages_json,
-          processing_status,
-          processing_error
-        )
-        values (
-          ${createdProjectId},
-          true,
-          ${file.name},
-          ${file.size},
-          ${file.type || "application/pdf"},
-          ${clientLastModified && !Number.isNaN(clientLastModified.getTime())
-            ? clientLastModified.toISOString()
-            : null},
-          ${parsed.pageCount},
-          ${parsed.text},
-          ${sql.json(parsed.pages)},
-          'ready',
-          null
-        )
-        returning id
-      `;
+      const { data: fileRow, error: fileError } = await supabase
+        .from("project_files")
+        .insert({
+          project_id: projectRow.id,
+          is_primary: true,
+          original_filename: file.name,
+          size_bytes: file.size,
+          mime_type: file.type || "application/pdf",
+          client_last_modified: clientLastModifiedIso,
+          page_count: parsed.pageCount,
+          extracted_text: parsed.text,
+          pages_json: parsed.pages,
+          processing_status: "ready",
+          processing_error: null,
+        })
+        .select("id")
+        .single();
 
-      const createdFileId = fileRows[0]?.id;
-      if (!createdFileId) {
-        throw new Error("Failed to create project file.");
+      if (fileError || !fileRow?.id) {
+        throw new Error(fileError?.message || "Failed to create project file.");
       }
 
-      await sql`
-        update projects
-        set primary_file_id = ${createdFileId}, updated_at = now()
-        where id = ${createdProjectId}
-      `;
+      const { error: updateProjectError } = await supabase
+        .from("projects")
+        .update({ primary_file_id: fileRow.id, updated_at: nowIso })
+        .eq("id", projectRow.id);
+
+      if (updateProjectError) {
+        throw new Error(updateProjectError.message || "Failed to finalize project.");
+      }
 
       return NextResponse.json({
         success: true,
-        projectId: createdProjectId,
-        fileId: createdFileId,
+        projectId: projectRow.id,
+        fileId: fileRow.id,
       });
     }
 
     if (action === "replace_primary") {
-      await sql`
-        update project_files
-        set is_primary = false
-        where project_id = ${projectId} and is_primary = true
-      `;
+      const targetProjectId = projectId as string;
+      const { error: demoteError } = await supabase
+        .from("project_files")
+        .update({ is_primary: false })
+        .eq("project_id", targetProjectId)
+        .eq("is_primary", true);
 
-      const fileRows = await sql<{ id: string }[]>`
-        insert into project_files (
-          project_id,
-          is_primary,
-          original_filename,
-          size_bytes,
-          mime_type,
-          client_last_modified,
-          page_count,
-          extracted_text,
-          pages_json,
-          processing_status,
-          processing_error
-        )
-        values (
-          ${projectId},
-          true,
-          ${file.name},
-          ${file.size},
-          ${file.type || "application/pdf"},
-          ${clientLastModified && !Number.isNaN(clientLastModified.getTime())
-            ? clientLastModified.toISOString()
-            : null},
-          ${parsed.pageCount},
-          ${parsed.text},
-          ${sql.json(parsed.pages)},
-          'ready',
-          null
-        )
-        returning id
-      `;
-
-      const replacedFileId = fileRows[0]?.id;
-      if (!replacedFileId) {
-        throw new Error("Failed to replace primary file.");
+      if (demoteError) {
+        throw new Error(demoteError.message || "Failed to replace primary file.");
       }
 
-      await sql`
-        update projects
-        set
-          title = ${normalizeProjectTitle(file.name)},
-          primary_file_id = ${replacedFileId},
-          feasibility_status = null,
-          feasibility_result_json = null,
-          method_status = 'idle',
-          method_error = null,
-          method_result_json = null,
-          updated_at = now()
-        where id = ${projectId}
-      `;
+      const { data: fileRow, error: fileError } = await supabase
+        .from("project_files")
+        .insert({
+          project_id: targetProjectId,
+          is_primary: true,
+          original_filename: file.name,
+          size_bytes: file.size,
+          mime_type: file.type || "application/pdf",
+          client_last_modified: clientLastModifiedIso,
+          page_count: parsed.pageCount,
+          extracted_text: parsed.text,
+          pages_json: parsed.pages,
+          processing_status: "ready",
+          processing_error: null,
+        })
+        .select("id")
+        .single();
+
+      if (fileError || !fileRow?.id) {
+        throw new Error(fileError?.message || "Failed to replace primary file.");
+      }
+
+      const { error: updateProjectError } = await supabase
+        .from("projects")
+        .update({
+          title: normalizeProjectTitle(file.name),
+          primary_file_id: fileRow.id,
+          feasibility_status: null,
+          feasibility_result_json: null,
+          method_status: "idle",
+          method_error: null,
+          method_result_json: null,
+          updated_at: nowIso,
+        })
+        .eq("id", targetProjectId);
+
+      if (updateProjectError) {
+        throw new Error(updateProjectError.message || "Failed to update project.");
+      }
 
       return NextResponse.json({
         success: true,
-        projectId,
-        fileId: replacedFileId,
+        projectId: targetProjectId,
+        fileId: fileRow.id,
       });
     }
 
-    const addedRows = await sql<{ id: string }[]>`
-      insert into project_files (
-        project_id,
-        is_primary,
-        original_filename,
-        size_bytes,
-        mime_type,
-        client_last_modified,
-        page_count,
-        extracted_text,
-        pages_json,
-        processing_status,
-        processing_error
-      )
-      values (
-        ${projectId},
-        false,
-        ${file.name},
-        ${file.size},
-        ${file.type || "application/pdf"},
-        ${clientLastModified && !Number.isNaN(clientLastModified.getTime())
-          ? clientLastModified.toISOString()
-          : null},
-        ${parsed.pageCount},
-        ${parsed.text},
-        ${sql.json(parsed.pages)},
-        'ready',
-        null
-      )
-      returning id
-    `;
+    const targetProjectId = projectId as string;
+    const { data: addedFile, error: addFileError } = await supabase
+      .from("project_files")
+      .insert({
+        project_id: targetProjectId,
+        is_primary: false,
+        original_filename: file.name,
+        size_bytes: file.size,
+        mime_type: file.type || "application/pdf",
+        client_last_modified: clientLastModifiedIso,
+        page_count: parsed.pageCount,
+        extracted_text: parsed.text,
+        pages_json: parsed.pages,
+        processing_status: "ready",
+        processing_error: null,
+      })
+      .select("id")
+      .single();
 
-    await sql`update projects set updated_at = now() where id = ${projectId}`;
+    if (addFileError) {
+      throw new Error(addFileError.message || "Failed to add sub paper.");
+    }
+
+    const { error: touchProjectError } = await supabase
+      .from("projects")
+      .update({ updated_at: nowIso })
+      .eq("id", targetProjectId);
+
+    if (touchProjectError) {
+      throw new Error(touchProjectError.message || "Failed to update project.");
+    }
 
     return NextResponse.json({
       success: true,
-      projectId,
-      fileId: addedRows[0]?.id ?? null,
+      projectId: targetProjectId,
+      fileId: addedFile?.id ?? null,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Extraction failed.";

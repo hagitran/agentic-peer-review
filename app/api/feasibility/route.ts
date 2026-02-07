@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSql } from "@/lib/db";
+import { createAdminClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -208,7 +208,7 @@ async function runFeasibilityCheck(cleanedText: string): Promise<FeasibilityResu
 
 export async function POST(request: Request) {
   try {
-    const sql = getSql();
+    const supabase = createAdminClient();
     const body = (await request.json()) as { projectId?: string };
     const projectId = body?.projectId?.trim();
 
@@ -219,42 +219,47 @@ export async function POST(request: Request) {
       );
     }
 
-    const rows = await sql<{
+    const { data: primary, error: primaryError } = await supabase
+      .from("project_files")
+      .select("id, extracted_text, processing_status")
+      .eq("project_id", projectId)
+      .eq("is_primary", true)
+      .limit(1)
+      .single();
+    const primaryRow = primary as {
       id: string;
       extracted_text: string;
       processing_status: string;
-    }[]>`
-      select pf.id, pf.extracted_text, pf.processing_status
-      from project_files pf
-      where pf.project_id = ${projectId} and pf.is_primary = true
-      limit 1
-    `;
+    } | null;
 
-    const primary = rows[0];
-    if (!primary) {
+    if (primaryError || !primaryRow) {
       return NextResponse.json(
         { success: false, error: "Primary file not found." },
         { status: 404 }
       );
     }
-    if (primary.processing_status !== "ready") {
+    if (primaryRow.processing_status !== "ready") {
       return NextResponse.json(
         { success: false, error: "Primary extraction is not ready." },
         { status: 400 }
       );
     }
 
-    const cleanedText = cleanForFeasibility(primary.extracted_text);
+    const cleanedText = cleanForFeasibility(primaryRow.extracted_text);
     const result = await runFeasibilityCheck(cleanedText);
 
-    await sql`
-      update projects
-      set
-        feasibility_status = ${result.feasible},
-        feasibility_result_json = ${sql.json(result)},
-        updated_at = now()
-      where id = ${projectId}
-    `;
+    const { error: updateError } = await supabase
+      .from("projects")
+      .update({
+        feasibility_status: result.feasible,
+        feasibility_result_json: result,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", projectId);
+
+    if (updateError) {
+      throw new Error(updateError.message || "Failed to save feasibility result.");
+    }
 
     return NextResponse.json({ success: true, result });
   } catch (error) {

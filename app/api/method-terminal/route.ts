@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSql } from "@/lib/db";
+import { createAdminClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -67,25 +67,31 @@ export async function POST(request: Request) {
       );
     }
 
-    const sql = getSql();
-    const rows = await sql<{ extracted_text: string; method_result_json: unknown }[]>`
-      select pf.extracted_text, p.method_result_json
-      from projects p
-      join project_files pf on pf.project_id = p.id
-      where p.id = ${projectId} and pf.is_primary = true
-      limit 1
-    `;
-    const row = rows[0];
-    if (!row) {
+    const supabase = createAdminClient();
+    const [{ data: primary, error: primaryError }, { data: project, error: projectError }] =
+      await Promise.all([
+        supabase
+          .from("project_files")
+          .select("extracted_text")
+          .eq("project_id", projectId)
+          .eq("is_primary", true)
+          .limit(1)
+          .single(),
+        supabase.from("projects").select("method_result_json").eq("id", projectId).limit(1).single(),
+      ]);
+    const primaryRow = primary as { extracted_text: string } | null;
+    const projectRow = project as { method_result_json: unknown } | null;
+
+    if (primaryError || !primaryRow || projectError || !projectRow) {
       return NextResponse.json({ success: false, error: "Primary file not found." }, { status: 404 });
     }
 
     const model = process.env.METHOD_TERMINAL_MODEL || "gpt-4.1-mini";
     const methodJson =
-      row.method_result_json && typeof row.method_result_json === "object"
-        ? JSON.stringify(row.method_result_json).slice(0, 1400)
+      projectRow.method_result_json && typeof projectRow.method_result_json === "object"
+        ? JSON.stringify(projectRow.method_result_json).slice(0, 1400)
         : "";
-    const paperSnippet = cleanText(row.extracted_text).slice(0, 4500);
+    const paperSnippet = cleanText(primaryRow.extracted_text).slice(0, 4500);
 
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -95,7 +101,7 @@ export async function POST(request: Request) {
       },
       body: JSON.stringify({
         model,
-        max_output_tokens: 48,
+        max_output_tokens: 120,
         input: [
           {
             role: "system",
@@ -103,7 +109,7 @@ export async function POST(request: Request) {
               {
                 type: "input_text",
                 text:
-                  "You are a terse method copilot. Reply in one short line only, max 90 characters. No markdown.",
+                  "You are a terse method copilot. Reply in one short line only. No markdown.",
               },
             ],
           },

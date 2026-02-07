@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSql } from "@/lib/db";
+import { createAdminClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -10,17 +10,16 @@ export async function DELETE(
 ) {
   try {
     const { fileId } = await params;
-    const sql = getSql();
+    const supabase = createAdminClient();
 
-    const rows = await sql<{ id: string; is_primary: boolean }[]>`
-      select id, is_primary
-      from project_files
-      where id = ${fileId}
-      limit 1
-    `;
+    const { data: file, error: fileError } = await supabase
+      .from("project_files")
+      .select("id, is_primary")
+      .eq("id", fileId)
+      .limit(1)
+      .single();
 
-    const file = rows[0];
-    if (!file) {
+    if (fileError || !file) {
       return NextResponse.json(
         { success: false, error: "File not found." },
         { status: 404 }
@@ -34,7 +33,11 @@ export async function DELETE(
       );
     }
 
-    await sql`delete from project_files where id = ${fileId}`;
+    const { error: deleteError } = await supabase.from("project_files").delete().eq("id", fileId);
+    if (deleteError) {
+      throw new Error(deleteError.message || "Delete failed.");
+    }
+
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Delete failed.";

@@ -1,16 +1,8 @@
 import { NextResponse } from "next/server";
 
-import { getSql } from "@/lib/db";
+import { createAdminClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
-
-async function ensureMethodErrorColumn() {
-  const sql = getSql();
-  await sql`
-    alter table projects
-    add column if not exists method_error text
-  `;
-}
 
 type MethodResult = {
   method_steps: Array<{
@@ -192,8 +184,7 @@ async function runMethodSynthesis(cleanedText: string): Promise<MethodResult> {
 export async function POST(request: Request) {
   let projectId: string | null = null;
   try {
-    await ensureMethodErrorColumn();
-    const sql = getSql();
+    const supabase = createAdminClient();
     const body = (await request.json()) as { projectId?: string };
     projectId = body?.projectId?.trim() ?? null;
 
@@ -204,45 +195,54 @@ export async function POST(request: Request) {
       );
     }
 
-    await sql`
-      update projects
-      set method_status = 'running', method_error = null, updated_at = now()
-      where id = ${projectId}
-    `;
+    const nowIso = new Date().toISOString();
+    const { error: startError } = await supabase
+      .from("projects")
+      .update({ method_status: "running", method_error: null, updated_at: nowIso })
+      .eq("id", projectId);
 
-    const rows = await sql<{ extracted_text: string; processing_status: string }[]>`
-      select extracted_text, processing_status
-      from project_files
-      where project_id = ${projectId} and is_primary = true
-      limit 1
-    `;
-    const primary = rows[0];
-    if (!primary || primary.processing_status !== "ready") {
+    if (startError) {
+      throw new Error(startError.message || "Failed to start method generation.");
+    }
+
+    const { data: primary, error: primaryError } = await supabase
+      .from("project_files")
+      .select("extracted_text, processing_status")
+      .eq("project_id", projectId)
+      .eq("is_primary", true)
+      .limit(1)
+      .single();
+    const primaryRow = primary as { extracted_text: string; processing_status: string } | null;
+
+    if (primaryError || !primaryRow || primaryRow.processing_status !== "ready") {
       throw new Error("Primary file extraction is not ready.");
     }
 
-    const result = await runMethodSynthesis(cleanText(primary.extracted_text));
+    const result = await runMethodSynthesis(cleanText(primaryRow.extracted_text));
 
-    await sql`
-      update projects
-      set
-        method_status = 'ready',
-        method_error = null,
-        method_result_json = ${sql.json(result)},
-        updated_at = now()
-      where id = ${projectId}
-    `;
+    const { error: completeError } = await supabase
+      .from("projects")
+      .update({
+        method_status: "ready",
+        method_error: null,
+        method_result_json: result,
+        updated_at: nowIso,
+      })
+      .eq("id", projectId);
+
+    if (completeError) {
+      throw new Error(completeError.message || "Failed to save method output.");
+    }
 
     return NextResponse.json({ success: true, result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Method generation failed.";
     if (projectId) {
-      const sql = getSql();
-      await sql`
-        update projects
-        set method_status = 'failed', method_error = ${message}, updated_at = now()
-        where id = ${projectId}
-      `;
+      const supabase = createAdminClient();
+      await supabase
+        .from("projects")
+        .update({ method_status: "failed", method_error: message, updated_at: new Date().toISOString() })
+        .eq("id", projectId);
     }
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }

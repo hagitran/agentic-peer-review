@@ -19,7 +19,9 @@ npm install
 
 2. Set environment variables in `/Users/hagi/Documents/Coding/agentic-peer-review/.env.local`
 ```bash
-DATABASE_URL=postgresql://...
+NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+OPENAI_API_KEY=<openai-key>
 ```
 
 3. Run dev server
