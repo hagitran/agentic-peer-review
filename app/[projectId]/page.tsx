@@ -156,6 +156,8 @@ export default function ProjectPage() {
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false);
   const terminalScrollRef = useRef<HTMLDivElement | null>(null);
+  const [evalBusy, setEvalBusy] = useState(false);
+  const [lastEvalResult, setLastEvalResult] = useState<Record<string, unknown> | null>(null);
 
   const previewFile = useMemo(
     () => project?.files.find((file) => file.id === previewFileId) ?? null,
@@ -492,6 +494,87 @@ export default function ProjectPage() {
     setActiveTab(tab);
     if (tab === "method" && hasLgtm && project.method_status === "idle" && busy !== "method") {
       void runMethod();
+    }
+  };
+
+  const buildMethodTextForEval = () => {
+    const lines: string[] = [];
+
+    if (methodData.methodSteps.length > 0) {
+      lines.push("Method steps:");
+      methodData.methodSteps.forEach((step, index) => {
+        lines.push(`${index + 1}. ${step.text}`);
+      });
+      lines.push("");
+    }
+
+    if (methodData.assumptions.length > 0) {
+      lines.push("Assumptions:");
+      methodData.assumptions.forEach((assumption, index) => {
+        lines.push(`- ${assumption}`);
+      });
+      lines.push("");
+    }
+
+    if (methodData.insights.length > 0) {
+      lines.push("Insights:");
+      methodData.insights.forEach((insight, index) => {
+        lines.push(`- ${insight}`);
+      });
+    }
+
+    return lines.join("\n").trim();
+  };
+
+  const runEvalPipeline = async () => {
+    if (!primaryFile) {
+      console.warn("[eval-ui] Primary PDF is required to run evals.");
+      return;
+    }
+    if (project.method_status !== "ready") {
+      console.warn("[eval-ui] Methodology must be generated before running evals.");
+      return;
+    }
+
+    setEvalBusy(true);
+
+    try {
+      const paperText = primaryFile.extracted_text;
+      const methodText = buildMethodTextForEval();
+
+      const response = await fetch("/api/eval/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task:
+            "Recreate the Python code that implements the paper's main method and experiments, and run it to check whether the same conclusions hold.",
+          paperText,
+          methodText: methodText || undefined,
+          maxIterations: 5,
+          defaultLanguage: "python3",
+          requireSufficientOutput: true,
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        result?: Record<string, unknown>;
+      };
+
+      if (!response.ok || !payload?.success || !payload.result) {
+        throw new Error(payload?.error || "Eval pipeline failed.");
+      }
+
+      setLastEvalResult(payload.result);
+      console.log("[eval-ui] Eval agent result:", payload.result);
+    } catch (e) {
+      console.error(
+        "[eval-ui] Eval pipeline failed:",
+        e instanceof Error ? e.message : "Eval pipeline failed."
+      );
+    } finally {
+      setEvalBusy(false);
     }
   };
 
@@ -948,7 +1031,50 @@ export default function ProjectPage() {
               <div className="border-b border-zinc-200 pb-4 text-sm font-medium text-zinc-900">
                 {activeTab === "evals" ? "Evals" : "Results"}
               </div>
-              <p className="mt-6 text-sm text-zinc-500">This panel is ready for the next step.</p>
+
+              {activeTab === "evals" && (
+                <div className="mt-6 space-y-4 text-sm">
+                  <p className="text-zinc-500">
+                    Run the replication agent to generate Python code from the paper and methodology,
+                    execute it in a sandbox, and capture the results.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => void runEvalPipeline()}
+                      disabled={
+                        evalBusy ||
+                        !primaryFile ||
+                        project.method_status !== "ready" ||
+                        busy !== null
+                      }
+                    >
+                      {evalBusy ? "Running replication agent..." : "Run replication agent"}
+                    </button>
+                    {!evalBusy && lastEvalResult !== null && (
+                      <button
+                        type="button"
+                        className="cursor-pointer border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                        onClick={() => setActiveTab("results")}
+                      >
+                        Go to results
+                      </button>
+                    )}
+                  </div>
+                  {project.method_status !== "ready" && (
+                    <p className="text-xs text-zinc-500">
+                      Generate methodology first, then run evals.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {activeTab === "results" && (
+                <p className="mt-6 text-sm text-zinc-500">
+                  Results view can be wired up to summarize and compare eval runs.
+                </p>
+              )}
             </div>
           )}
         </section>

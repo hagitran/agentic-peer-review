@@ -9,11 +9,15 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.26",
+    "@e2b/code-interpreter": "^2.0.0",
     "@supabase/supabase-js": "^2.95.3",
+    "ai": "^6.0.77",
     "next": "16.1.6",
     "pdf2json": "^2.1.0",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
