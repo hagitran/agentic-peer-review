@@ -63,6 +63,37 @@ type TerminalMessage = {
   text: string;
 };
 
+type EvalRunResult =
+  | { success: true; output: string }
+  | { success: false; error: string };
+
+type OutputAssessment = {
+  sufficient: boolean;
+  missing: string[];
+  rationale: string;
+  requested_changes: string[];
+};
+
+type EvalAgentStep = {
+  iteration: number;
+  suggestion: { code: string; language?: string; explanation?: string };
+  runResult: EvalRunResult;
+  outputAssessment?: OutputAssessment;
+};
+
+type EvalAgentResult =
+  | {
+      success: true;
+      steps: EvalAgentStep[];
+      finalOutput: string;
+      finalAssessment?: OutputAssessment;
+    }
+  | {
+      success: false;
+      steps: EvalAgentStep[];
+      lastError: string;
+    };
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
@@ -157,7 +188,9 @@ export default function ProjectPage() {
   const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false);
   const terminalScrollRef = useRef<HTMLDivElement | null>(null);
   const [evalBusy, setEvalBusy] = useState(false);
-  const [lastEvalResult, setLastEvalResult] = useState<Record<string, unknown> | null>(null);
+  const [lastEvalResult, setLastEvalResult] = useState<EvalAgentResult | null>(null);
+  const [resultsAnalysis, setResultsAnalysis] = useState<string | null>(null);
+  const [resultsAnalysisBusy, setResultsAnalysisBusy] = useState(false);
 
   const previewFile = useMemo(
     () => project?.files.find((file) => file.id === previewFileId) ?? null,
@@ -537,6 +570,7 @@ export default function ProjectPage() {
     }
 
     setEvalBusy(true);
+    setResultsAnalysis(null);
 
     try {
       const paperText = primaryFile.extracted_text;
@@ -559,7 +593,7 @@ export default function ProjectPage() {
       const payload = (await response.json()) as {
         success?: boolean;
         error?: string;
-        result?: Record<string, unknown>;
+        result?: EvalAgentResult;
       };
 
       if (!response.ok || !payload?.success || !payload.result) {
@@ -575,6 +609,44 @@ export default function ProjectPage() {
       );
     } finally {
       setEvalBusy(false);
+    }
+  };
+
+  const runResultsAnalysis = async () => {
+    if (!primaryFile || !lastEvalResult) return;
+    const replicationOutput =
+      lastEvalResult.success ? lastEvalResult.finalOutput : lastEvalResult.lastError;
+
+    setResultsAnalysisBusy(true);
+    setResultsAnalysis(null);
+    try {
+      const response = await fetch("/api/eval/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          paperText: primaryFile.extracted_text,
+          methodAssumptions: methodData.assumptions,
+          methodInsights: methodData.insights,
+          methodSteps: methodData.methodSteps.map((s) => s.text),
+          replicationOutput,
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        analysis?: string;
+      };
+
+      if (!response.ok || !payload?.success || !payload.analysis) {
+        throw new Error(payload?.error || "Results analysis failed.");
+      }
+
+      setResultsAnalysis(payload.analysis);
+    } catch (e) {
+      setResultsAnalysis(e instanceof Error ? e.message : "Results analysis failed.");
+    } finally {
+      setResultsAnalysisBusy(false);
     }
   };
 
@@ -1071,9 +1143,53 @@ export default function ProjectPage() {
               )}
 
               {activeTab === "results" && (
-                <p className="mt-6 text-sm text-zinc-500">
-                  Results view can be wired up to summarize and compare eval runs.
-                </p>
+                <div className="mt-6 space-y-4">
+                  {!lastEvalResult && (
+                    <p className="text-sm text-zinc-500">
+                      No eval run yet. Run the replication agent in the Evals tab to generate and execute code.
+                    </p>
+                  )}
+
+                  {lastEvalResult && (
+                    <>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          className="cursor-pointer border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => setActiveTab("evals")}
+                        >
+                          Back to evals
+                        </button>
+                        <button
+                          type="button"
+                          className="cursor-pointer bg-amber-300 px-3 py-2 text-xs font-semibold text-zinc-900 transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => void runResultsAnalysis()}
+                          disabled={resultsAnalysisBusy || evalBusy || busy !== null}
+                        >
+                          {resultsAnalysisBusy ? "Analyzing..." : "Analyze alignment"}
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-zinc-900">Replication output</p>
+                        <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words border border-zinc-200 bg-zinc-50 p-3 text-xs leading-5 text-zinc-800">
+                          {lastEvalResult.success
+                            ? lastEvalResult.finalOutput
+                            : lastEvalResult.lastError}
+                        </pre>
+                      </div>
+
+                      {resultsAnalysis && (
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium text-zinc-900">LLM comparison</p>
+                          <pre className="whitespace-pre-wrap break-words border border-zinc-200 bg-white p-3 text-xs leading-5 text-zinc-700">
+                            {resultsAnalysis}
+                          </pre>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               )}
             </div>
           )}

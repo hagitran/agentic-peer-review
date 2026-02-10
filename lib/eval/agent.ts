@@ -9,7 +9,6 @@ type CodeSuggestion = {
 type OutputAssessment = {
   sufficient: boolean;
   missing: string[];
-  rationale: string;
   requested_changes: string[];
 };
 
@@ -361,16 +360,20 @@ async function assessOutputSufficiency(params: {
                   "- We do NOT need to reproduce every implementation detail if the paper underspecifies them.",
                   "",
                   "Your job:",
-                  "- Decide whether the provided program output is a WELL-FORMED replication attempt report that a third party can evaluate from logs alone.",
-                  "- Focus on: are the experiments described, are key parameters/environment recorded, and are the numeric results printed clearly?",
+                  "- Decide whether the provided program output is a WELL-FORMED experiment run report that a third party can interpret.",
+                  "- Focus on: are the experiments described, are key parameters/assumptions recorded, and are the numeric results printed clearly?",
                   "",
                   "Important standards (be practical):",
                   "- Do NOT require exact appendix/code-level parity if the paper excerpt does not specify it.",
                   "- It is valid for the program to state it cannot compare to the paper's claimed numbers if baselines are missing; that can still be SUFFICIENT output if it clearly states what is missing and avoids overclaiming.",
                   "- Prefer sufficiency when the output is structured, explicit, and honest.",
+                  "- Do NOT require printing the full code, repo links, command lines, OS/hardware specs, or pip freeze. We only need the experiment outputs and enough context to understand them.",
                   "",
                   "Sufficient output MUST include:",
-                  "- All experiments outputs, including details such as hyperparameters and assumptions and seeds",
+                  "- What was run (experiment/procedure summary).",
+                  "- Key hyperparameters/settings and assumptions used.",
+                  "- Seeds/determinism notes if randomness is used (or explicitly 'not set').",
+                  "- Clear numeric results (tables/metrics) relevant to the paper's major claims, OR a clear statement of why results cannot be produced.",
                   "",
                   "Return JSON only.",
                 ].join("\n"),
@@ -404,9 +407,9 @@ async function assessOutputSufficiency(params: {
             properties: {
               sufficient: { type: "boolean" },
               missing: { type: "array", items: { type: "string" } },
-              rationale: { type: "string" },
               requested_changes: { type: "array", items: { type: "string" } },
             },
+            // With strict schemas, OpenAI requires `required` to include every property key.
             required: ["sufficient", "missing", "requested_changes"],
           },
         },
@@ -445,7 +448,6 @@ async function assessOutputSufficiency(params: {
     missing: Array.isArray(parsed?.missing)
       ? parsed.missing.map((x) => String(x)).filter(Boolean).slice(0, 20)
       : [],
-    rationale: typeof parsed?.rationale === "string" ? parsed.rationale : "",
     requested_changes: Array.isArray(parsed?.requested_changes)
       ? parsed.requested_changes.map((x) => String(x)).filter(Boolean).slice(0, 20)
       : [],
@@ -542,14 +544,12 @@ export async function runEvalAgent(params: {
           missingCount: assessment.missing.length,
           missing: assessment.missing,
           requestedChanges: assessment.requested_changes,
-          rationalePreview: toLogSnippet(assessment.rationale || "", 800),
         });
 
         if (!assessment.sufficient) {
           previousSuggestion = suggestion;
           lastError =
             "Execution succeeded but output was insufficient to judge replicability.\n" +
-            `Judge rationale: ${assessment.rationale?.trim() || "(no rationale)"}\n` +
             `Missing: ${assessment.missing.join("; ") || "(none listed)"}\n` +
             `Requested changes: ${assessment.requested_changes.join("; ") || "(none listed)"}\n\n` +
             "Output snippet:\n" +
