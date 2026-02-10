@@ -51,25 +51,22 @@ function truncateText(value: string, maxChars: number) {
 function buildSystemPrompt() {
   return [
     "You are a research code replication agent.",
-    "Your job is to reconstruct, as faithfully as possible, the code used in an academic paper so that its results and conclusions can be re-checked.",
+    "Your job is to reconstruct, as faithfully as possible, the code used in an academic paper so that its results and conclusions can be re-checked. ALL THE EXPERIMENTAL OUTPUTS MUST BE PRINTED OUT.",
     "",
-    "Rules:",
-    "- Prioritize reproducing the paper's methods, algorithms, data processing, and hyperparameters as described in the text.",
-    "- When details are underspecified, make the smallest, most conservative assumptions needed to get a working implementation and clearly document them in your explanation string (not in the code).",
-    "- Prefer Python scripts that can be executed as-is (e.g. `python script.py`) and that print their key quantitative outputs to stdout.",
-    "- The script should be self-contained as far as possible (define all functions/classes you use, import required libraries, and include any data-generation or toy-data logic if real data access is not available).",
-    "- Do not invent entirely new algorithms or evaluation procedures; stay close to what the paper describes.",
-    "- Do not include explanations or markdown inside the code itself; explanations go only in the JSON `explanation` field.",
+    "Core rules:",
+    "- Faithfulness first: reproduce the paper's method, data processing, training/eval procedure, and hyperparameters as described.",
+    "- If something is underspecified, make the smallest conservative assumption needed to run; record assumptions in the JSON explanation field (NOT inside the code).",
+    "- Produce a single runnable Python script (e.g. `python script.py`). No notebooks, no interactive prompts.",
+    "- Keep the script self-contained: include all functions/classes you use; if real data is unavailable, generate clearly-labeled toy/synthetic data and explain the limitation.",
+    "- Do not include mnarrative commentary inside the code; print runtime information to stdout instead.",
     "",
-    "Critical: The script output must be sufficient for a third party to judge replicability from the logs alone.",
-    "Output requirements (print all of these):",
-    "- A clear 'REPLICATION REPORT' section header.",
-    "- Exact parameter values / hyperparameters used (including any defaults you assume).",
-    "- Random seed(s) and a note on determinism/stochasticity.",
-    "- Environment details: Python version and key package versions used (at minimum: numpy, scipy, pandas, matplotlib, torch/sklearn if used).",
-    "- The key metrics/tables/figures needed to evaluate whether the paper's conclusions hold (print numeric values, not just plots).",
-    "- If comparing against claims in the paper, restate the claim and print your computed value side-by-side.",
-    "- A final machine-readable JSON line prefixed with 'REPLICATION_JSON:' that includes: parameters, metrics, and a short verdict string.",
+    "Critical: evaluation is based on stdout/stderr ONLY.",
+    "",
+    "Output contract (MUST follow):",
+    "- Print out all experiments outputs",
+    "- Print out all details of experiments, including hyperparameters and assumptions and seeds",
+    "",
+    "Required sections to print (in this order):"
   ].join("\n");
 }
 
@@ -355,8 +352,28 @@ async function assessOutputSufficiency(params: {
             {
               type: "input_text",
               text:
-                "You are a strict reproducibility judge. Decide whether the provided run output is sufficient to judge whether the paper is replicable (from output alone). " +
-                "If insufficient, list exactly what is missing and what the code should print next time.",
+                [
+                  "You are a replication-attempt output judge.",
+                  "",
+                  "Goal:",
+                  "- The goal is to rerun the paper's main experiments and capture the experimental outputs (metrics/tables/figures-as-numbers).",
+                  "- Another downstream step will interpret results and decide any verdict; you do NOT require a verdict here.",
+                  "- We do NOT need to reproduce every implementation detail if the paper underspecifies them.",
+                  "",
+                  "Your job:",
+                  "- Decide whether the provided program output is a WELL-FORMED replication attempt report that a third party can evaluate from logs alone.",
+                  "- Focus on: are the experiments described, are key parameters/environment recorded, and are the numeric results printed clearly?",
+                  "",
+                  "Important standards (be practical):",
+                  "- Do NOT require exact appendix/code-level parity if the paper excerpt does not specify it.",
+                  "- It is valid for the program to state it cannot compare to the paper's claimed numbers if baselines are missing; that can still be SUFFICIENT output if it clearly states what is missing and avoids overclaiming.",
+                  "- Prefer sufficiency when the output is structured, explicit, and honest.",
+                  "",
+                  "Sufficient output MUST include:",
+                  "- All experiments outputs, including details such as hyperparameters and assumptions and seeds",
+                  "",
+                  "Return JSON only.",
+                ].join("\n"),
             },
           ],
         },
@@ -369,6 +386,7 @@ async function assessOutputSufficiency(params: {
                 `Task:\n${params.task}\n\n` +
                 (params.methodText ? `Method summary:\n${params.methodText}\n\n` : "") +
                 (paperSnippet ? `Paper excerpt:\n${paperSnippet}\n\n` : "") +
+                "Reminder: We aim to rerun the main experiments and assess major claims; not every detail must be replicated if the paper is underspecified.\n\n" +
                 `Program output (stdout/stderr combined):\n${stdoutSnippet}\n\n` +
                 "Return JSON only.",
             },
@@ -389,7 +407,7 @@ async function assessOutputSufficiency(params: {
               rationale: { type: "string" },
               requested_changes: { type: "array", items: { type: "string" } },
             },
-            required: ["sufficient", "missing", "rationale", "requested_changes"],
+            required: ["sufficient", "missing", "requested_changes"],
           },
         },
       },

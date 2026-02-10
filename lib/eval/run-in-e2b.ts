@@ -42,8 +42,8 @@ export async function runInE2b(
 
     const execution = await sandbox.runCode(code, {
       language: normalizedLanguage,
-      timeoutMs: 60_000,
-      requestTimeoutMs: 60_000,
+      timeoutMs: 300_000,
+      requestTimeoutMs: 300_000,
     });
 
     // If Python raised an error, surface it as a failure.
